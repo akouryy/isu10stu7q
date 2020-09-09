@@ -461,7 +461,7 @@ func queryHaveRead(userID int64) (map[int64]int64, error) {
 	h := HaveRead{}
 	ret := make(map[int64]int64)
 
-	rows, err := db.Query("SELECT * FROM haveread WHERE user_id = ?")
+	rows, err := db.Query("SELECT * FROM haveread WHERE user_id = ?", userID)
 	if err != nil {
 		return nil, err
 	}

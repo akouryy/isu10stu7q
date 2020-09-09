@@ -19,6 +19,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -470,6 +471,65 @@ func queryHaveRead(userID, chID int64) (int64, error) {
 	return h.MessageID, nil
 }
 
+// 置換:
+//   msgCount → 関数名
+//   cid int32 → param list (例: `i int32, j string`)
+//   cid → arg list (例: `i, j`)
+//   int64 → 戻り値の型のerrorじゃない方
+var (
+	msgCountZTCDelay   = 100 * time.Millisecond // 入れなくても良いが、入れることでより多くの呼び出しをまとめられるかも
+	msgCountZTCAddLock sync.Mutex
+	msgCountZTCLock    = make(map[int64]*sync.Mutex)
+	msgCountZTCTime    = make(map[int64]time.Time)
+	msgCountZTCResult  = make(map[int64]int64)
+	msgCountZTCError   = make(map[int64]error)
+)
+
+// Zero Time Cache ≒ value-returning throttle
+//   throttleで「無視」される呼び出しAが、次の「無視」されない呼び出しBを待ち、Bの結果をAも結果として返す。
+func msgCountZTC(cid int64) (int64, error) {
+	t := time.Now()
+
+	_, ok := msgCountZTCLock[cid]
+	if !ok {
+		msgCountZTCAddLock.Lock()
+		_, ok := msgCountZTCLock[cid]
+		if !ok {
+			msgCountZTCLock[cid] = &sync.Mutex{}
+		}
+		msgCountZTCAddLock.Unlock()
+	}
+
+	msgCountZTCLock[cid].Lock()
+	// defer msgCountZTCLock.Unlock()
+
+	if msgCountZTCTime[cid].After(t) {
+		msgCountZTCLock[cid].Unlock() // deferの代わり
+		return msgCountZTCResult[cid], msgCountZTCError[cid]
+	}
+
+	if msgCountZTCDelay > 0 {
+		time.Sleep(msgCountZTCDelay)
+	}
+	msgCountZTCTime[cid] = time.Now() // これを本体の処理より上に書く！ (当然) (Sleepよりは後でいい)
+
+	msgCountZTCResult[cid], msgCountZTCError[cid] = msgCountWithoutZTC(cid)
+
+	msgCountZTCLock[cid].Unlock() // deferの代わり
+	return msgCountZTCResult[cid], msgCountZTCError[cid]
+}
+
+// 本体の処理
+// msgCountZTC経由の呼び出しは排他制御が保証されているが、ほかの関数との兼ね合いで内部で別のmutexを使うこともある
+func msgCountWithoutZTC(cid int64) (int64, error) {
+	var cnt int64
+	err := db.Get(&cnt,
+		"SELECT msg_count FROM channel WHERE id = ?", // TODO ZTC
+		cid,
+	)
+	return cnt, err
+}
+
 func fetchUnread(c echo.Context) error {
 	userID := sessUserID(c)
 	if userID == 0 {
@@ -497,9 +557,7 @@ func fetchUnread(c echo.Context) error {
 				"SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id",
 				chID, lastID)
 		} else {
-			err = db.Get(&cnt,
-				"SELECT msg_count FROM channel WHERE id = ?",
-				chID)
+			cnt, err = msgCountZTC(chID)
 		}
 		if err != nil {
 			return err
@@ -536,8 +594,7 @@ func getHistory(c echo.Context) error {
 	}
 
 	const N = 20
-	var cnt int64
-	err = db.Get(&cnt, "SELECT msg_count FROM channel WHERE id = ?", chID)
+	cnt, err := msgCountZTC(chID)
 	if err != nil {
 		return err
 	}

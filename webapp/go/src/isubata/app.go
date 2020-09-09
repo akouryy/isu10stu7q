@@ -109,32 +109,21 @@ func getUser(userID int64) (*User, error) {
 	return &u, nil
 }
 
-func addMessage(ctx context.Context, channelID, userID int64, content string) (int64, error) {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, err
-	}
+var (
+	msgCountsLock sync.RWMutex
+	msgCounts     = make(map[int64]int64)
+)
 
-	_, err = tx.Exec(
-		"UPDATE channel SET msg_count = msg_count + 1 WHERE id = ?",
-		channelID,
+func addMessage(ctx context.Context, channelID, userID int64, content string) (int64, error) {
+	msgCountsLock.Lock()
+	msgCounts[channelID]++
+	msgCountsLock.Unlock()
+
+	res, err := db.Exec(
+		"INSERT INTO message (channel_id, user_id, content, created_at) VALUES (?, ?, ?, NOW())",
+		channelID, userID, content,
 	)
 	if err != nil {
-		_ = tx.Rollback()
-		return 0, err
-	}
-
-	res, err := tx.Exec(
-		"INSERT INTO message (channel_id, user_id, content, created_at) VALUES (?, ?, ?, NOW())",
-		channelID, userID, content)
-	if err != nil {
-		_ = tx.Rollback()
-		return 0, err
-	}
-
-	err = tx.Commit()
-	if err != nil {
-		_ = tx.Rollback()
 		return 0, err
 	}
 
@@ -238,9 +227,19 @@ func getInitialize(c echo.Context) error {
 	db.MustExec("DELETE FROM message WHERE id > 10000")
 	db.MustExec("DELETE FROM haveread")
 
-	db.MustExec(`
-		UPDATE channel SET msg_count = (SELECT COUNT(*) FROM message WHERE channel_id = channel.id)
+	cs := []ChannelInfo{}
+	err := db.Select(&cs, `
+		SELECT channel_id as id, COUNT(*) as msg_count FROM message GROUP BY channel_id
 	`)
+	if err != nil {
+		return err
+	}
+
+	msgCountsLock.Lock()
+	for _, c := range cs {
+		msgCounts[c.ID] = c.MsgCount
+	}
+	msgCountsLock.Unlock()
 
 	return c.String(204, "")
 }
@@ -260,7 +259,7 @@ type ChannelInfo struct {
 	ID          int64     `db:"id"`
 	Name        string    `db:"name"`
 	Description string    `db:"description"`
-	MsgCount    string    `db:"msg_count" json:"-"`
+	MsgCount    int64     `db:"msg_count" json:"-"`
 	UpdatedAt   time.Time `db:"updated_at"`
 	CreatedAt   time.Time `db:"created_at"`
 }
@@ -501,62 +500,6 @@ func queryHaveRead(userID int64) (map[int64]int64, error) {
 	return ret, nil
 }
 
-// 置換:
-//   msgAll → 関数名
-//    → param list (例: `i int32, j string`)
-//    → arg list (例: `i, j`)
-//   map[int64]int64 → 戻り値の型のerrorじゃない方
-var (
-	msgAllZTCDelay  = 100 * time.Millisecond // 入れなくても良いが、入れることでより多くの呼び出しをまとめられるかも
-	msgAllZTCLock   sync.Mutex
-	msgAllZTCTime   time.Time
-	msgAllZTCResult map[int64]int64
-	msgAllZTCError  error
-)
-
-// Zero Time Cache ≒ value-returning throttle
-//   throttleで「無視」される呼び出しAが、次の「無視」されない呼び出しBを待ち、Bの結果をAも結果として返す。
-func msgAllZTC() (map[int64]int64, error) {
-	t := time.Now()
-	msgAllZTCLock.Lock()
-	// defer msgAllZTCLock.Unlock()
-
-	if msgAllZTCTime.After(t) {
-		msgAllZTCLock.Unlock() // deferの代わり
-		return msgAllZTCResult, msgAllZTCError
-	}
-
-	if msgAllZTCDelay > 0 {
-		time.Sleep(msgAllZTCDelay)
-	}
-	msgAllZTCTime = time.Now() // これを本体の処理より上に書く！ (当然) (Sleepよりは後でいい)
-
-	msgAllZTCResult, msgAllZTCError = msgAllWithoutZTC()
-
-	msgAllZTCLock.Unlock() // deferの代わり
-	return msgAllZTCResult, msgAllZTCError
-}
-
-// 本体の処理
-// msgAllZTC経由の呼び出しは排他制御が保証されているが、ほかの関数との兼ね合いで内部で別のmutexを使うこともある
-func msgAllWithoutZTC() (map[int64]int64, error) {
-	rows, err := db.Query("SELECT id, msg_count FROM channel")
-	if err != nil {
-		return nil, err
-	}
-
-	res := make(map[int64]int64)
-	for rows.Next() {
-		var id, cnt int64
-		err := rows.Scan(&id, &cnt)
-		if err != nil {
-			return nil, err
-		}
-		res[id] = cnt
-	}
-	return res, nil
-}
-
 func fetchUnread(c echo.Context) error {
 	userID := sessUserID(c)
 	if userID == 0 {
@@ -577,11 +520,6 @@ func fetchUnread(c echo.Context) error {
 		return err
 	}
 
-	cnts, err := msgAllZTC()
-	if err != nil {
-		return err
-	}
-
 	for _, chID := range channels {
 		var cnt int64
 		if lastIDs[chID] > 0 {
@@ -589,11 +527,9 @@ func fetchUnread(c echo.Context) error {
 				"SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id",
 				chID, lastIDs[chID])
 		} else {
-			var ok bool
-			cnt, ok = cnts[chID]
-			if !ok {
-				return sql.ErrNoRows
-			}
+			msgCountsLock.RLock()
+			cnt = msgCounts[chID]
+			msgCountsLock.RUnlock()
 		}
 		if err != nil {
 			return err
@@ -630,14 +566,10 @@ func getHistory(c echo.Context) error {
 	}
 
 	const N = 20
-	cnts, err := msgAllZTC()
-	if err != nil {
-		return err
-	}
-	cnt, ok := cnts[chID]
-	if !ok {
-		return sql.ErrNoRows
-	}
+	msgCountsLock.RLock()
+	cnt := msgCounts[chID]
+	msgCountsLock.RUnlock()
+
 	maxPage := int64(cnt+N-1) / N
 	if maxPage == 0 {
 		maxPage = 1
@@ -744,6 +676,11 @@ func postAddChannel(c echo.Context) error {
 		return err
 	}
 	lastID, _ := res.LastInsertId()
+
+	msgCountsLock.Lock()
+	msgCounts[lastID] = 0
+	msgCountsLock.Unlock()
+
 	return c.Redirect(http.StatusSeeOther,
 		fmt.Sprintf("/channel/%v", lastID))
 }

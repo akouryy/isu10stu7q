@@ -109,15 +109,18 @@ func getUser(userID int64) (*User, error) {
 	return &u, nil
 }
 
+const MC = 10
+
 var (
-	msgCountsLock sync.RWMutex
-	msgCounts     = make(map[int64]int64)
+	msgCountsLock [MC]sync.RWMutex
+	msgCounts     [MC]map[int64]int64
 )
 
 func addMessage(ctx context.Context, channelID, userID int64, content string) (int64, error) {
-	msgCountsLock.Lock()
-	msgCounts[channelID]++
-	msgCountsLock.Unlock()
+	d := channelID % MC
+	msgCountsLock[d].Lock()
+	msgCounts[d][channelID]++
+	msgCountsLock[d].Unlock()
 
 	res, err := db.Exec(
 		"INSERT INTO message (channel_id, user_id, content, created_at) VALUES (?, ?, ?, NOW())",
@@ -235,11 +238,18 @@ func getInitialize(c echo.Context) error {
 		return err
 	}
 
-	msgCountsLock.Lock()
-	for _, c := range cs {
-		msgCounts[c.ID] = c.MsgCount
+	for i := range msgCounts {
+		msgCountsLock[i].Lock()
+		msgCounts[i] = make(map[int64]int64)
+		msgCountsLock[i].Unlock()
 	}
-	msgCountsLock.Unlock()
+
+	for _, c := range cs {
+		d := c.ID % MC
+		msgCountsLock[d].Lock()
+		msgCounts[d][c.ID] = c.MsgCount
+		msgCountsLock[d].Unlock()
+	}
 
 	return c.String(204, "")
 }
@@ -527,9 +537,10 @@ func fetchUnread(c echo.Context) error {
 				"SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id",
 				chID, lastIDs[chID])
 		} else {
-			msgCountsLock.RLock()
-			cnt = msgCounts[chID]
-			msgCountsLock.RUnlock()
+			d := chID % MC
+			msgCountsLock[d].RLock()
+			cnt = msgCounts[d][chID]
+			msgCountsLock[d].RUnlock()
 		}
 		if err != nil {
 			return err
@@ -566,9 +577,10 @@ func getHistory(c echo.Context) error {
 	}
 
 	const N = 20
-	msgCountsLock.RLock()
-	cnt := msgCounts[chID]
-	msgCountsLock.RUnlock()
+	d := chID % MC
+	msgCountsLock[d].RLock()
+	cnt := msgCounts[d][chID]
+	msgCountsLock[d].RUnlock()
 
 	maxPage := int64(cnt+N-1) / N
 	if maxPage == 0 {
@@ -677,9 +689,10 @@ func postAddChannel(c echo.Context) error {
 	}
 	lastID, _ := res.LastInsertId()
 
-	msgCountsLock.Lock()
-	msgCounts[lastID] = 0
-	msgCountsLock.Unlock()
+	d := lastID % MC
+	msgCountsLock[d].Lock()
+	msgCounts[d][lastID] = 0
+	msgCountsLock[d].Unlock()
 
 	return c.Redirect(http.StatusSeeOther,
 		fmt.Sprintf("/channel/%v", lastID))

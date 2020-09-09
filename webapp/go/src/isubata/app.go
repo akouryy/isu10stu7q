@@ -450,7 +450,7 @@ func queryChannels() ([]int64, error) {
 	return res, err
 }
 
-func queryHaveRead(userID, chID int64) (int64, error) {
+func queryHaveRead(userID int64) (map[int64]int64, error) {
 	type HaveRead struct {
 		UserID    int64     `db:"user_id"`
 		ChannelID int64     `db:"channel_id"`
@@ -459,16 +459,23 @@ func queryHaveRead(userID, chID int64) (int64, error) {
 		CreatedAt time.Time `db:"created_at"`
 	}
 	h := HaveRead{}
+	ret := make(map[int64]int64)
 
-	err := db.Get(&h, "SELECT * FROM haveread WHERE user_id = ? AND channel_id = ?",
-		userID, chID)
-
-	if err == sql.ErrNoRows {
-		return 0, nil
-	} else if err != nil {
-		return 0, err
+	rows, err := db.Query("SELECT * FROM haveread WHERE user_id = ?")
+	if err != nil {
+		return nil, err
 	}
-	return h.MessageID, nil
+	defer rows.Close()
+
+	for rows.Next() {
+		err := rows.Scan(&h)
+		if err != nil {
+			return nil, err
+		}
+		ret[h.ChannelID] = h.MessageID
+	}
+
+	return ret, nil
 }
 
 // 置換:
@@ -545,17 +552,17 @@ func fetchUnread(c echo.Context) error {
 
 	resp := []map[string]interface{}{}
 
-	for _, chID := range channels {
-		lastID, err := queryHaveRead(userID, chID)
-		if err != nil {
-			return err
-		}
+	lastIDs, err := queryHaveRead(userID)
+	if err != nil {
+		return err
+	}
 
+	for _, chID := range channels {
 		var cnt int64
-		if lastID > 0 {
+		if lastIDs[chID] > 0 {
 			err = db.Get(&cnt,
 				"SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id",
-				chID, lastID)
+				chID, lastIDs[chID])
 		} else {
 			cnt, err = msgCountZTC(chID)
 		}

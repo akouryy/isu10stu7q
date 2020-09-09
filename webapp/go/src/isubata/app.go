@@ -385,20 +385,46 @@ func postMessage(c echo.Context) error {
 	return c.NoContent(204)
 }
 
-func jsonifyMessage(m Message) (map[string]interface{}, error) {
-	u := User{}
-	err := db.Get(&u, "SELECT name, display_name, avatar_icon FROM user WHERE id = ?",
-		m.UserID)
+func jsonifyMessages(messages []Message) ([]map[string]interface{}, error) {
+	userIDs := make([]int64, 0, len(messages))
+	for _, message := range messages {
+		userIDs = append(userIDs, message.UserID)
+	}
+
+	query, args, err := sqlx.In(
+		"SELECT name, display_name, avatar_icon FROM user WHERE id IN (?)",
+		userIDs,
+	)
 	if err != nil {
 		return nil, err
 	}
 
-	r := make(map[string]interface{})
-	r["id"] = m.ID
-	r["user"] = u
-	r["date"] = m.CreatedAt.Format("2006/01/02 15:04:05")
-	r["content"] = m.Content
-	return r, nil
+	users := []User{}
+	err = db.Select(&users, query, args...)
+	if err != nil {
+		return nil, err
+	}
+
+	userByID := make(map[int64]User)
+	for _, user := range users {
+		userByID[user.ID] = user
+	}
+
+	response := make([]map[string]interface{}, 0)
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		u := userByID[m.ID]
+
+		r := make(map[string]interface{})
+		r["id"] = m.ID
+		r["user"] = u
+		r["date"] = m.CreatedAt.Format("2006/01/02 15:04:05")
+		r["content"] = m.Content
+
+		response = append(response, r)
+	}
+
+	return response, nil
 }
 
 func getMessage(c echo.Context) error {
@@ -421,14 +447,9 @@ func getMessage(c echo.Context) error {
 		return err
 	}
 
-	response := make([]map[string]interface{}, 0)
-	for i := len(messages) - 1; i >= 0; i-- {
-		m := messages[i]
-		r, err := jsonifyMessage(m)
-		if err != nil {
-			return err
-		}
-		response = append(response, r)
+	response, err := jsonifyMessages(messages)
+	if err != nil {
+		return err
 	}
 
 	if len(messages) > 0 {
@@ -627,13 +648,9 @@ func getHistory(c echo.Context) error {
 		return err
 	}
 
-	mjson := make([]map[string]interface{}, 0)
-	for i := len(messages) - 1; i >= 0; i-- {
-		r, err := jsonifyMessage(messages[i])
-		if err != nil {
-			return err
-		}
-		mjson = append(mjson, r)
+	mjson, err := jsonifyMessages(messages)
+	if err != nil {
+		return err
 	}
 
 	channels := []ChannelInfo{}

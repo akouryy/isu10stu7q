@@ -533,11 +533,16 @@ func msgCountZTC(cid int64) (int64, error) {
 	lock.Lock()
 	// defer msgCountZTCLock.Unlock()
 
+	msgCountZTCTimeLock.Lock()
 	if msgCountZTCTime[cid].After(t) {
+		msgCountZTCTimeLock.Unlock()
+		msgCountZTCResultLock.Lock()
 		r, e := msgCountZTCResult[cid], msgCountZTCError[cid]
+		msgCountZTCResultLock.Unlock()
 		lock.Unlock() // deferの代わり
 		return r, e
 	}
+	msgCountZTCTimeLock.Unlock()
 
 	if msgCountZTCDelay > 0 {
 		time.Sleep(msgCountZTCDelay)
@@ -560,7 +565,7 @@ func msgCountZTC(cid int64) (int64, error) {
 func msgCountWithoutZTC(cid int64) (int64, error) {
 	var cnt int64
 	err := db.Get(&cnt,
-		"SELECT msg_count FROM channel WHERE id = ?", // TODO ZTC
+		"SELECT msg_count FROM channel WHERE id = ?",
 		cid,
 	)
 	return cnt, err

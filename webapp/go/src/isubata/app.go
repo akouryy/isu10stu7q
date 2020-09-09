@@ -701,6 +701,11 @@ func writeIcons() error {
 		return errors.New("runtime.Caller")
 	}
 
+	_, errNoExist := os.Stat(path.Join(path.Dir(filename), "../../../public/icons/", "default.png"))
+	if errNoExist == nil {
+		return nil
+	}
+
 	rows, err := db.Query("SELECT name, data FROM image")
 	if err != nil {
 		return err

@@ -490,15 +490,13 @@ var (
 func msgCountZTC(cid int64) (int64, error) {
 	t := time.Now()
 
-	_, ok := msgCountZTCLock[cid]
+	msgCountZTCAddLock.Lock()
+	lock, ok := msgCountZTCLock[cid]
 	if !ok {
-		msgCountZTCAddLock.Lock()
-		_, ok := msgCountZTCLock[cid]
-		if !ok {
-			msgCountZTCLock[cid] = &sync.Mutex{}
-		}
-		msgCountZTCAddLock.Unlock()
+		lock = &sync.Mutex{}
+		msgCountZTCLock[cid] = lock
 	}
+	msgCountZTCAddLock.Unlock()
 
 	msgCountZTCLock[cid].Lock()
 	// defer msgCountZTCLock.Unlock()

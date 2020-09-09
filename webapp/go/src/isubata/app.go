@@ -215,7 +215,7 @@ func getInitialize(c echo.Context) error {
 	err := writeIcons()
 
 	if err != nil {
-		return c.Redirect(http.StatusSeeOther, "/channel/1")
+		return err
 	}
 
 	return c.String(204, "")
@@ -707,6 +707,8 @@ func writeIcons() error {
 	}
 	defer rows.Close()
 
+	i := 0
+
 	for rows.Next() {
 		err := rows.Scan(&name, &data)
 		if err != nil {
@@ -716,7 +718,9 @@ func writeIcons() error {
 		if err != nil {
 			return err
 		}
+		i++
 	}
+	log.Println(i, "files written")
 
 	return nil
 }
@@ -794,6 +798,8 @@ func main() {
 	e.GET("add_channel", getAddChannel)
 	e.POST("add_channel", postAddChannel)
 	// e.GET("/icons/:file_name", getIcon)
+
+	fmt.Println("Hello, world! zoi")
 
 	e.Start(":5000")
 }

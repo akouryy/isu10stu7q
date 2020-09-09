@@ -484,12 +484,14 @@ func queryHaveRead(userID int64) (map[int64]int64, error) {
 //   cid → arg list (例: `i, j`)
 //   int64 → 戻り値の型のerrorじゃない方
 var (
-	msgCountZTCDelay   = 0 * time.Millisecond // 入れなくても良いが、入れることでより多くの呼び出しをまとめられるかも
-	msgCountZTCAddLock sync.Mutex
-	msgCountZTCLock    = make(map[int64]*sync.Mutex)
-	msgCountZTCTime    = make(map[int64]time.Time)
-	msgCountZTCResult  = make(map[int64]int64)
-	msgCountZTCError   = make(map[int64]error)
+	msgCountZTCDelay      = 0 * time.Millisecond // 入れなくても良いが、入れることでより多くの呼び出しをまとめられるかも
+	msgCountZTCAddLock    sync.Mutex
+	msgCountZTCLock       = make(map[int64]*sync.Mutex)
+	msgCountZTCTimeLock   sync.Mutex
+	msgCountZTCTime       = make(map[int64]time.Time)
+	msgCountZTCResultLock sync.Mutex
+	msgCountZTCResult     = make(map[int64]int64)
+	msgCountZTCError      = make(map[int64]error)
 )
 
 // Zero Time Cache ≒ value-returning throttle
@@ -505,23 +507,29 @@ func msgCountZTC(cid int64) (int64, error) {
 	}
 	msgCountZTCAddLock.Unlock()
 
-	msgCountZTCLock[cid].Lock()
+	lock.Lock()
 	// defer msgCountZTCLock.Unlock()
 
 	if msgCountZTCTime[cid].After(t) {
-		msgCountZTCLock[cid].Unlock() // deferの代わり
-		return msgCountZTCResult[cid], msgCountZTCError[cid]
+		r, e := msgCountZTCResult[cid], msgCountZTCError[cid]
+		lock.Unlock() // deferの代わり
+		return r, e
 	}
 
 	if msgCountZTCDelay > 0 {
 		time.Sleep(msgCountZTCDelay)
 	}
+	msgCountZTCTimeLock.Lock()
 	msgCountZTCTime[cid] = time.Now() // これを本体の処理より上に書く！ (当然) (Sleepよりは後でいい)
+	msgCountZTCTimeLock.Unlock()
 
-	msgCountZTCResult[cid], msgCountZTCError[cid] = msgCountWithoutZTC(cid)
+	r, e := msgCountWithoutZTC(cid)
+	msgCountZTCResultLock.Lock()
+	msgCountZTCResult[cid], msgCountZTCError[cid] = r, e
+	msgCountZTCResultLock.Unlock()
 
-	msgCountZTCLock[cid].Unlock() // deferの代わり
-	return msgCountZTCResult[cid], msgCountZTCError[cid]
+	lock.Unlock() // deferの代わり
+	return r, e
 }
 
 // 本体の処理

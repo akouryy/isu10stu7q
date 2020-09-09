@@ -477,7 +477,7 @@ func queryHaveRead(userID, chID int64) (int64, error) {
 //   cid → arg list (例: `i, j`)
 //   int64 → 戻り値の型のerrorじゃない方
 var (
-	msgCountZTCDelay   = 100 * time.Millisecond // 入れなくても良いが、入れることでより多くの呼び出しをまとめられるかも
+	msgCountZTCDelay   = 0 * time.Millisecond // 入れなくても良いが、入れることでより多くの呼び出しをまとめられるかも
 	msgCountZTCAddLock sync.Mutex
 	msgCountZTCLock    = make(map[int64]*sync.Mutex)
 	msgCountZTCTime    = make(map[int64]time.Time)

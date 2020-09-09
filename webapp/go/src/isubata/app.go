@@ -461,14 +461,14 @@ func queryHaveRead(userID int64) (map[int64]int64, error) {
 	h := HaveRead{}
 	ret := make(map[int64]int64)
 
-	rows, err := db.Query("SELECT * FROM haveread WHERE user_id = ?", userID)
+	rows, err := db.Queryx("SELECT * FROM haveread WHERE user_id = ?", userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	for rows.Next() {
-		err := rows.Scan(&h)
+		err := rows.StructScan(&h)
 		if err != nil {
 			return nil, err
 		}

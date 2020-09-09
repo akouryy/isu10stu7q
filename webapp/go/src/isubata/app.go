@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	crand "crypto/rand"
 	"crypto/sha1"
 	"database/sql"
@@ -107,13 +108,35 @@ func getUser(userID int64) (*User, error) {
 	return &u, nil
 }
 
-func addMessage(channelID, userID int64, content string) (int64, error) {
-	res, err := db.Exec(
-		"INSERT INTO message (channel_id, user_id, content, created_at) VALUES (?, ?, ?, NOW())",
-		channelID, userID, content)
+func addMessage(ctx context.Context, channelID, userID int64, content string) (int64, error) {
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
+
+	_, err = tx.Exec(
+		"UPDATE channel SET msg_count = msg_count + 1 WHERE id = ?",
+		channelID,
+	)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, err
+	}
+
+	res, err := tx.Exec(
+		"INSERT INTO message (channel_id, user_id, content, created_at) VALUES (?, ?, ?, NOW())",
+		channelID, userID, content)
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, err
+	}
+
+	err = tx.Commit()
+	if err != nil {
+		_ = tx.Rollback()
+		return 0, err
+	}
+
 	return res.LastInsertId()
 }
 
@@ -212,11 +235,9 @@ func getInitialize(c echo.Context) error {
 	db.MustExec("DELETE FROM message WHERE id > 10000")
 	db.MustExec("DELETE FROM haveread")
 
-	err := writeIcons()
-
-	if err != nil {
-		return err
-	}
+	db.MustExec(`
+		UPDATE channel SET msg_count = (SELECT COUNT(*) FROM message WHERE channel_id = channel.id)
+	`)
 
 	return c.String(204, "")
 }
@@ -353,7 +374,7 @@ func postMessage(c echo.Context) error {
 		chanID = int64(x)
 	}
 
-	if _, err := addMessage(chanID, user.ID, message); err != nil {
+	if _, err := addMessage(c.Request().Context(), chanID, user.ID, message); err != nil {
 		return err
 	}
 
@@ -474,7 +495,7 @@ func fetchUnread(c echo.Context) error {
 				chID, lastID)
 		} else {
 			err = db.Get(&cnt,
-				"SELECT COUNT(*) as cnt FROM message WHERE channel_id = ?",
+				"SELECT msg_count FROM channel WHERE id = ?",
 				chID)
 		}
 		if err != nil {
@@ -513,7 +534,7 @@ func getHistory(c echo.Context) error {
 
 	const N = 20
 	var cnt int64
-	err = db.Get(&cnt, "SELECT COUNT(*) as cnt FROM message WHERE channel_id = ?", chID)
+	err = db.Get(&cnt, "SELECT msg_count FROM channel WHERE id = ?", chID)
 	if err != nil {
 		return err
 	}
@@ -805,6 +826,12 @@ func main() {
 	e.GET("/icons/:file_name", getIcon)
 
 	fmt.Println("Hello, world! zoi")
+
+	err := writeIcons()
+
+	if err != nil {
+		panic(err)
+	}
 
 	e.Start(":5000")
 }

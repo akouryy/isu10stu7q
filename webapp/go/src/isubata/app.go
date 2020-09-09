@@ -5,6 +5,7 @@ import (
 	"crypto/sha1"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"html/template"
 	"io"
@@ -13,6 +14,8 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"path"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -208,6 +211,13 @@ func getInitialize(c echo.Context) error {
 	db.MustExec("DELETE FROM channel WHERE id > 10")
 	db.MustExec("DELETE FROM message WHERE id > 10000")
 	db.MustExec("DELETE FROM haveread")
+
+	err := writeIcons()
+
+	if err != nil {
+		return c.Redirect(http.StatusSeeOther, "/channel/1")
+	}
+
 	return c.String(204, "")
 }
 
@@ -682,6 +692,35 @@ func postProfile(c echo.Context) error {
 	return c.Redirect(http.StatusSeeOther, "/")
 }
 
+func writeIcons() error {
+	var name string
+	var data []byte
+
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		return errors.New("runtime.Caller")
+	}
+
+	rows, err := db.Query("SELECT name, data FROM image")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		err := rows.Scan(&name, &data)
+		if err != nil {
+			return err
+		}
+		err = ioutil.WriteFile(path.Join(path.Dir(filename), "../../../public/icons/", name), data, 0666)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func getIcon(c echo.Context) error {
 	var name string
 	var data []byte
@@ -754,7 +793,7 @@ func main() {
 
 	e.GET("add_channel", getAddChannel)
 	e.POST("add_channel", postAddChannel)
-	e.GET("/icons/:file_name", getIcon)
+	// e.GET("/icons/:file_name", getIcon)
 
 	e.Start(":5000")
 }

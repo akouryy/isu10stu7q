@@ -142,21 +142,91 @@ type Message struct {
 	CreatedAt time.Time `db:"created_at"`
 }
 
-func queryMessages(chanID, lastID int64) ([]Message, error) {
-	msgs := []Message{}
-	var err error
-	if lastID == 0 {
-		err = db.Select(&msgs,
-			`SELECT * FROM message WHERE channel_id = ? ORDER BY id DESC LIMIT 100`,
-			chanID,
-		)
-	} else {
-		err = db.Select(&msgs,
-			`SELECT * FROM message WHERE channel_id = ? AND id > ? ORDER BY id DESC LIMIT 100`,
-			chanID, lastID,
-		)
+// 置換:
+//   latest → 関数名
+//   cid int32 → param list (例: `i int32, j string`)
+//   cid → arg list (例: `i, j`)
+//   int64 → 戻り値の型のerrorじゃない方
+var (
+	latestZTCDelay      = 50 * time.Millisecond // 入れなくても良いが、入れることでより多くの呼び出しをまとめられるかも
+	latestZTCAddLock    sync.Mutex
+	latestZTCLock       = make(map[int64]*sync.Mutex)
+	latestZTCTimeLock   sync.Mutex
+	latestZTCTime       = make(map[int64]time.Time)
+	latestZTCResultLock sync.Mutex
+	latestZTCResult     = make(map[int64][]Message)
+	latestZTCError      = make(map[int64]error)
+)
+
+// Zero Time Cache ≒ value-returning throttle
+//   throttleで「無視」される呼び出しAが、直前の「無視」されなかった呼び出しBを待ち、Bの結果をAも結果として返す。
+func latestZTC(cid int64) ([]Message, error) {
+	t := time.Now()
+
+	latestZTCAddLock.Lock()
+	lock, ok := latestZTCLock[cid]
+	if !ok {
+		lock = &sync.Mutex{}
+		latestZTCLock[cid] = lock
 	}
+	latestZTCAddLock.Unlock()
+
+	lock.Lock()
+	// defer latestZTCLock.Unlock()
+
+	latestZTCTimeLock.Lock()
+	if latestZTCTime[cid].After(t) {
+		latestZTCTimeLock.Unlock()
+		latestZTCResultLock.Lock()
+		r, e := latestZTCResult[cid], latestZTCError[cid]
+		latestZTCResultLock.Unlock()
+		lock.Unlock() // deferの代わり
+		return r, e
+	}
+	latestZTCTimeLock.Unlock()
+
+	if latestZTCDelay > 0 {
+		time.Sleep(latestZTCDelay)
+	}
+	latestZTCTimeLock.Lock()
+	latestZTCTime[cid] = time.Now() // これを本体の処理より上に書く！ (当然) (Sleepよりは後でいい)
+	latestZTCTimeLock.Unlock()
+
+	r, e := latestWithoutZTC(cid)
+	latestZTCResultLock.Lock()
+	latestZTCResult[cid], latestZTCError[cid] = r, e
+	latestZTCResultLock.Unlock()
+
+	lock.Unlock() // deferの代わり
+	return r, e
+}
+
+// 本体の処理
+// latestZTC経由の呼び出しは排他制御が保証されているが、ほかの関数との兼ね合いで内部で別のmutexを使うこともある
+func latestWithoutZTC(cid int64) ([]Message, error) {
+	msgs := []Message{}
+	err := db.Select(&msgs,
+		`SELECT * FROM message WHERE channel_id = ? ORDER BY id DESC LIMIT 100`,
+		cid,
+	)
 	return msgs, err
+}
+
+func queryMessages(chanID, lastID int64) ([]Message, error) {
+	msgs, err := latestZTC(chanID)
+	if err != nil {
+		return nil, err
+	}
+	if lastID != 0 {
+		maxI := -1
+		for i, msg := range msgs {
+			if msg.ID > lastID {
+				maxI = i
+			}
+		} // TODO: 二分探索？ (akouryy)
+		msgs = msgs[:maxI+1]
+	}
+	return msgs, nil
 }
 
 func sessUserID(c echo.Context) int64 {

@@ -605,7 +605,7 @@ func fetchUnread(c echo.Context) error {
 				"SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id",
 				chID, lastIDs[chID])
 		} else {
-			cnt = msgCounts[chID]
+			cnt = atomic.LoadInt64(&msgCounts[chID])
 		}
 		if err != nil {
 			return err
@@ -642,7 +642,7 @@ func getHistory(c echo.Context) error {
 	}
 
 	const N = 20
-	cnt := msgCounts[chID]
+	cnt := atomic.LoadInt64(&msgCounts[chID])
 
 	maxPage := int64(cnt+N-1) / N
 	if maxPage == 0 {

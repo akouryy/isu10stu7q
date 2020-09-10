@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-sql-driver/mysql"
@@ -110,18 +111,14 @@ func getUser(userID int64) (*User, error) {
 	return &u, nil
 }
 
-const MC = 10
+const ChannelMax = 10000
 
 var (
-	msgCountsLock [MC]sync.RWMutex
-	msgCounts     [MC]map[int64]int64
+	msgCounts [ChannelMax]int64
 )
 
 func addMessage(ctx context.Context, channelID, userID int64, content string) (int64, error) {
-	d := channelID % MC
-	msgCountsLock[d].Lock()
-	msgCounts[d][channelID]++
-	msgCountsLock[d].Unlock()
+	atomic.AddInt64(&msgCounts[channelID], 1)
 
 	res, err := db.Exec(
 		"INSERT INTO message (channel_id, user_id, content, created_at) VALUES (?, ?, ?, NOW())",
@@ -306,6 +303,7 @@ func getInitialize(c echo.Context) error {
 	db.MustExec("DELETE FROM user WHERE id > 1000")
 	db.MustExec("DELETE FROM image WHERE id > 1001")
 	db.MustExec("DELETE FROM channel WHERE id > 10")
+	db.MustExec("ALTER TABLE channel AUTO_INCREMENT = 11")
 	db.MustExec("DELETE FROM message WHERE id > 10000")
 	db.MustExec("DELETE FROM haveread")
 
@@ -317,17 +315,8 @@ func getInitialize(c echo.Context) error {
 		return err
 	}
 
-	for i := range msgCounts {
-		msgCountsLock[i].Lock()
-		msgCounts[i] = make(map[int64]int64)
-		msgCountsLock[i].Unlock()
-	}
-
 	for _, c := range cs {
-		d := c.ID % MC
-		msgCountsLock[d].Lock()
-		msgCounts[d][c.ID] = c.MsgCount
-		msgCountsLock[d].Unlock()
+		atomic.StoreInt64(&msgCounts[c.ID], c.MsgCount)
 	}
 
 	return c.String(204, "")
@@ -616,10 +605,7 @@ func fetchUnread(c echo.Context) error {
 				"SELECT COUNT(*) as cnt FROM message WHERE channel_id = ? AND ? < id",
 				chID, lastIDs[chID])
 		} else {
-			d := chID % MC
-			msgCountsLock[d].RLock()
-			cnt = msgCounts[d][chID]
-			msgCountsLock[d].RUnlock()
+			cnt = msgCounts[chID]
 		}
 		if err != nil {
 			return err
@@ -656,10 +642,7 @@ func getHistory(c echo.Context) error {
 	}
 
 	const N = 20
-	d := chID % MC
-	msgCountsLock[d].RLock()
-	cnt := msgCounts[d][chID]
-	msgCountsLock[d].RUnlock()
+	cnt := msgCounts[chID]
 
 	maxPage := int64(cnt+N-1) / N
 	if maxPage == 0 {
@@ -768,10 +751,7 @@ func postAddChannel(c echo.Context) error {
 	}
 	lastID, _ := res.LastInsertId()
 
-	d := lastID % MC
-	msgCountsLock[d].Lock()
-	msgCounts[d][lastID] = 0
-	msgCountsLock[d].Unlock()
+	atomic.StoreInt64(&msgCounts[lastID], 0)
 
 	return c.Redirect(http.StatusSeeOther,
 		fmt.Sprintf("/channel/%v", lastID))

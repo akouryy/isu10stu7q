@@ -940,5 +940,7 @@ func main() {
 
 	echopprof.Wrap(e)
 
+	runtime.SetMutexProfileFraction(5)
+
 	e.Start(":5000")
 }

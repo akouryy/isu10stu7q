@@ -28,6 +28,7 @@ import (
 	"github.com/labstack/echo"
 	"github.com/labstack/echo-contrib/session"
 	"github.com/labstack/echo/middleware"
+	echopprof "github.com/sevenNt/echo-pprof"
 )
 
 const (
@@ -878,6 +879,8 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
+	echopprof.Wrap(e)
 
 	e.Start(":5000")
 }
